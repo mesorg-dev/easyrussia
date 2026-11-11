@@ -714,31 +714,233 @@ fn latest_best_config(
 }
 
 fn launch_strategy(release_dir: &Path, config: &str) -> Result<(), String> {
-    if !valid_strategy_name(config) {
-        return Err("Имя стратегии в отчёте некорректно".to_owned());
-    }
-    let strategy = release_dir.join(config);
-    if !strategy.is_file() {
-        return Err("Файл выбранной стратегии не найден".to_owned());
+    let args = strategy_arguments(release_dir, config)?;
+    let bin_dir = release_dir.join("bin");
+    let winws = bin_dir.join("winws.exe");
+    if !winws.is_file() {
+        return Err("В релизе не найден bin/winws.exe".to_owned());
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
-        std::process::Command::new("cmd.exe")
-            .args(["/C", "start", "", "/min"])
-            .arg(strategy)
-            .current_dir(release_dir)
-            .creation_flags(CREATE_NEW_CONSOLE)
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        std::process::Command::new(winws)
+            .args(args)
+            .current_dir(bin_dir)
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(display_error)?;
         Ok(())
     }
     #[cfg(not(windows))]
     {
-        let _ = (release_dir, strategy);
+        let _ = (release_dir, args, winws);
         Err("Запуск стратегий поддерживается только в Windows".to_owned())
     }
+}
+
+fn strategy_arguments(release_dir: &Path, config: &str) -> Result<Vec<String>, String> {
+    if !valid_strategy_name(config) {
+        return Err("Имя стратегии некорректно".to_owned());
+    }
+    ensure_user_lists(release_dir)?;
+    let strategy = release_dir.join(config);
+    let batch = fs::read_to_string(&strategy).map_err(display_error)?;
+    let mut launch_line = String::new();
+    let mut capturing = false;
+
+    for line in batch.lines() {
+        let trimmed = line.trim_end();
+        if !capturing {
+            let lowercase = trimmed.to_ascii_lowercase();
+            if !lowercase.trim_start().starts_with("start ") || !lowercase.contains("winws.exe") {
+                continue;
+            }
+            capturing = true;
+        }
+
+        let continued = trimmed.ends_with('^');
+        let fragment = if continued {
+            &trimmed[..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        if !launch_line.is_empty() {
+            launch_line.push(' ');
+        }
+        launch_line.push_str(fragment.trim());
+        if !continued {
+            break;
+        }
+    }
+
+    if !capturing {
+        return Err("В стратегии не найдена команда запуска winws.exe".to_owned());
+    }
+    let lowercase = launch_line.to_ascii_lowercase();
+    let executable_end = lowercase
+        .find("winws.exe")
+        .map(|index| index + "winws.exe".len())
+        .ok_or_else(|| "Не удалось разобрать путь к winws.exe".to_owned())?;
+    let arguments = launch_line[executable_end..].trim();
+    let game_filter = read_game_port_filter(release_dir);
+    let bin_dir = path_prefix(&release_dir.join("bin"));
+    let lists_dir = path_prefix(&release_dir.join("lists"));
+    let root_dir = path_prefix(release_dir);
+    let expanded = expand_batch_variables(
+        arguments,
+        &[
+            ("BIN", bin_dir.as_str()),
+            ("LISTS", lists_dir.as_str()),
+            ("GAMEFILTERTCP", game_filter.tcp.as_str()),
+            ("GAMEFILTERUDP", game_filter.udp.as_str()),
+            ("~DP0", root_dir.as_str()),
+        ],
+    )?;
+    split_windows_arguments(&expanded)
+}
+
+fn path_prefix(path: &Path) -> String {
+    let mut value = path.to_string_lossy().into_owned();
+    if !value.ends_with(std::path::MAIN_SEPARATOR) {
+        value.push(std::path::MAIN_SEPARATOR);
+    }
+    value
+}
+
+fn expand_batch_variables(input: &str, values: &[(&str, &str)]) -> Result<String, String> {
+    let mut expanded = String::with_capacity(input.len());
+    let mut remaining = input;
+    while let Some(open) = remaining.find('%') {
+        expanded.push_str(&remaining[..open]);
+        let variable_start = open + 1;
+        let Some(close_relative) = remaining[variable_start..].find('%') else {
+            return Err("В команде стратегии найдена незакрытая переменная".to_owned());
+        };
+        let close = variable_start + close_relative;
+        let variable = &remaining[variable_start..close];
+        let replacement = values
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(variable))
+            .map(|(_, value)| *value)
+            .ok_or_else(|| format!("Неизвестная переменная в стратегии: %{variable}%"))?;
+        expanded.push_str(replacement);
+        remaining = &remaining[close + 1..];
+    }
+    expanded.push_str(remaining);
+    Ok(expanded)
+}
+
+fn split_windows_arguments(input: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in input.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            character if character.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if quoted {
+        return Err("Кавычки в команде стратегии не сбалансированы".to_owned());
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    if args.is_empty() {
+        return Err("В команде стратегии нет параметров для winws.exe".to_owned());
+    }
+    Ok(args)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GamePortFilter {
+    tcp: String,
+    udp: String,
+}
+
+fn read_game_port_filter(release_dir: &Path) -> GamePortFilter {
+    let settings = fs::read_to_string(release_dir.join("utils").join("game_filter.enabled"))
+        .unwrap_or_default();
+    let mut mode = "disabled";
+    let mut tcp_candidate = None;
+    let mut udp_candidate = None;
+    for line in settings.lines() {
+        let (key, value) = line.split_once('=').unwrap_or((line, ""));
+        match key.trim().to_ascii_lowercase().as_str() {
+            "mode" => mode = value.trim(),
+            "all" => mode = "all",
+            "tcp" if value.trim().is_empty() => mode = "tcp",
+            "tcp" => tcp_candidate = Some(value.trim()),
+            "udp" if value.trim().is_empty() => mode = "udp",
+            "udp" => udp_candidate = Some(value.trim()),
+            _ => {}
+        }
+    }
+    let tcp_range = tcp_candidate
+        .and_then(validate_port_ranges)
+        .unwrap_or_else(|| "1024-65535".to_owned());
+    let udp_range = udp_candidate
+        .and_then(validate_port_ranges)
+        .unwrap_or_else(|| "1024-65535".to_owned());
+    match mode.to_ascii_lowercase().as_str() {
+        "all" => GamePortFilter {
+            tcp: tcp_range,
+            udp: udp_range,
+        },
+        "tcp" => GamePortFilter {
+            tcp: tcp_range,
+            udp: "12".to_owned(),
+        },
+        "udp" => GamePortFilter {
+            tcp: "12".to_owned(),
+            udp: udp_range,
+        },
+        _ => GamePortFilter {
+            tcp: "12".to_owned(),
+            udp: "12".to_owned(),
+        },
+    }
+}
+
+fn validate_port_ranges(input: &str) -> Option<String> {
+    let normalized = input.chars().filter(|character| !character.is_whitespace()).collect::<String>();
+    if normalized.is_empty() {
+        return None;
+    }
+    for range in normalized.split(',') {
+        let (start, end) = range.split_once('-').unwrap_or((range, range));
+        let start = start.parse::<u32>().ok()?;
+        let end = end.parse::<u32>().ok()?;
+        if start == 0 || end > 65535 || start > end {
+            return None;
+        }
+    }
+    Some(normalized)
+}
+
+fn ensure_user_lists(release_dir: &Path) -> Result<(), String> {
+    let lists_dir = release_dir.join("lists");
+    fs::create_dir_all(&lists_dir).map_err(display_error)?;
+    for (name, contents) in [
+        ("ipset-exclude-user.txt", "203.0.113.113/32\n"),
+        (
+            "list-general-user.txt",
+            "# Never leave this file empty\ndomain.example.abc\n",
+        ),
+        ("list-exclude-user.txt", "domain.example.abc\n"),
+    ] {
+        let path = lists_dir.join(name);
+        if !path.exists() {
+            fs::write(path, contents).map_err(display_error)?;
+        }
+    }
+    Ok(())
 }
 
 fn scan_strategies(release_dir: &Path) -> Vec<String> {
@@ -1032,7 +1234,10 @@ fn main() -> Result<(), eframe::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{latest_best_config, scan_strategies, valid_strategy_name, valid_tag};
+    use super::{
+        latest_best_config, read_game_port_filter, scan_strategies, strategy_arguments,
+        validate_port_ranges, valid_strategy_name, valid_tag, GamePortFilter,
+    };
     use std::fs;
     use std::time::{Duration, SystemTime};
 
@@ -1067,6 +1272,61 @@ mod tests {
             scan_strategies(directory.path()),
             vec!["general (ALT).bat", "general.bat"]
         );
+    }
+
+    #[test]
+    fn strategy_arguments_expand_paths_filters_and_continuations() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let utils = directory.path().join("utils");
+        fs::create_dir_all(&utils).expect("utils directory");
+        fs::create_dir_all(directory.path().join("bin")).expect("bin directory");
+        fs::create_dir_all(directory.path().join("lists")).expect("lists directory");
+        fs::write(
+            utils.join("game_filter.enabled"),
+            "mode=all\ntcp=443,8443-8444\nudp=53\n",
+        )
+        .expect("game filter settings");
+        fs::write(
+            directory.path().join("general.bat"),
+            "@echo off\nstart \"zapret\" /min \"%BIN%winws.exe\" --wf-tcp=80,%GameFilterTCP% --wf-udp=%GameFilterUDP% ^\n--list=\"%LISTS%custom list.txt\" --fake=\"%BIN%active.bin\"\n",
+        )
+        .expect("strategy file");
+
+        let args = strategy_arguments(directory.path(), "general.bat")
+            .expect("parse strategy arguments");
+        let expected_list = format!(
+            "--list={}custom list.txt",
+            super::path_prefix(&directory.path().join("lists"))
+        );
+        let expected_fake = format!(
+            "--fake={}active.bin",
+            super::path_prefix(&directory.path().join("bin"))
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--wf-tcp=80,443,8443-8444".to_owned(),
+                "--wf-udp=53".to_owned(),
+                expected_list,
+                expected_fake,
+            ]
+        );
+        assert!(directory.path().join("lists/list-general-user.txt").is_file());
+    }
+
+    #[test]
+    fn game_filter_defaults_to_disabled_and_rejects_bad_port_ranges() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        assert_eq!(
+            read_game_port_filter(directory.path()),
+            GamePortFilter {
+                tcp: "12".to_owned(),
+                udp: "12".to_owned(),
+            }
+        );
+        assert_eq!(validate_port_ranges("53,1000-2000"), Some("53,1000-2000".to_owned()));
+        assert_eq!(validate_port_ranges("0,70000"), None);
+        assert_eq!(validate_port_ranges("2000-1000"), None);
     }
 
     #[test]
