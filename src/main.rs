@@ -782,7 +782,11 @@ fn strategy_arguments(release_dir: &Path, config: &str) -> Result<Vec<String>, S
         .find("winws.exe")
         .map(|index| index + "winws.exe".len())
         .ok_or_else(|| "Не удалось разобрать путь к winws.exe".to_owned())?;
-    let arguments = launch_line[executable_end..].trim();
+    let tail = launch_line[executable_end..].trim_start();
+    let arguments = tail
+        .strip_prefix('"')
+        .unwrap_or(tail)
+        .trim_start();
     let game_filter = read_game_port_filter(release_dir);
     let bin_dir = path_prefix(&release_dir.join("bin"));
     let lists_dir = path_prefix(&release_dir.join("lists"));
