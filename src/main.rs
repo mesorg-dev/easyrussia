@@ -988,9 +988,7 @@ fn bypass_is_running() -> bool {
         if service_is_running() {
             return true;
         }
-        return std::process::Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq winws.exe", "/NH"])
-            .output()
+        return hidden_command_output("tasklist.exe", &["/FI", "IMAGENAME eq winws.exe", "/NH"])
             .map(|output| String::from_utf8_lossy(&output.stdout).contains("winws.exe"))
             .unwrap_or(false);
     }
@@ -1001,9 +999,7 @@ fn bypass_is_running() -> bool {
 fn service_is_running() -> bool {
     #[cfg(windows)]
     {
-        return std::process::Command::new("sc.exe")
-            .args(["query", "zapret"])
-            .output()
+        return hidden_command_output("sc.exe", &["query", "zapret"])
             .map(|output| String::from_utf8_lossy(&output.stdout).contains("RUNNING"))
             .unwrap_or(false);
     }
@@ -1015,25 +1011,19 @@ fn stop_running_bypass() -> Result<(), String> {
     #[cfg(windows)]
     {
         if service_is_running() {
-            let output = std::process::Command::new("sc.exe")
-                .args(["stop", "zapret"])
-                .output()
+            let output = hidden_command_output("sc.exe", &["stop", "zapret"])
                 .map_err(display_error)?;
             if !output.status.success() && service_is_running() {
                 return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
             }
             return Ok(());
         }
-        let output = std::process::Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq winws.exe", "/NH"])
-            .output()
+        let output = hidden_command_output("tasklist.exe", &["/FI", "IMAGENAME eq winws.exe", "/NH"])
             .map_err(display_error)?;
         if !String::from_utf8_lossy(&output.stdout).contains("winws.exe") {
             return Ok(());
         }
-        let output = std::process::Command::new("taskkill.exe")
-            .args(["/IM", "winws.exe", "/F"])
-            .output()
+        let output = hidden_command_output("taskkill.exe", &["/IM", "winws.exe", "/F"])
             .map_err(display_error)?;
         if output.status.success() {
             Ok(())
@@ -1043,6 +1033,19 @@ fn stop_running_bypass() -> Result<(), String> {
     }
     #[cfg(not(windows))]
     Err("Остановка поддерживается только в Windows".to_owned())
+}
+
+#[cfg(windows)]
+fn hidden_command_output(
+    program: &str,
+    args: &[&str],
+) -> io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    std::process::Command::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
 }
 
 #[cfg(windows)]
