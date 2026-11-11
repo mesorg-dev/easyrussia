@@ -3,7 +3,7 @@
 use eframe::egui;
 use serde::Deserialize;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -230,7 +230,7 @@ impl eframe::App for EasyRussiaApp {
                 ui.add_space(16.0);
                 egui::Frame::default()
                     .fill(egui::Color32::WHITE)
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(220)))
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_gray(220)))
                     .inner_margin(egui::Margin::same(16))
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new("СОСТОЯНИЕ").size(11.0).strong());
@@ -367,7 +367,7 @@ fn install_latest_release(data_dir: &Path) -> Result<(String, PathBuf), String> 
     let mut unpacked_size = 0_u64;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(display_error)?;
-        let Some(relative_path) = entry.enclosed_name().map(Path::to_path_buf) else {
+        let Some(relative_path) = entry.enclosed_name().as_deref().map(Path::to_path_buf) else {
             return Err("В архиве обнаружен небезопасный путь".to_owned());
         };
         unpacked_size = unpacked_size.saturating_add(entry.size());
