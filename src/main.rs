@@ -443,7 +443,7 @@ impl eframe::App for EasyRussiaApp {
                     .show(ui, |ui| {
                         for config in &visible_configs {
                             let selected = self.selected_config.as_deref() == Some(config);
-                            if ui.selectable_label(selected, &config).clicked() {
+                            if ui.selectable_label(selected, config.as_str()).clicked() {
                                 self.selected_config = Some(config.clone());
                                 selected_changed = true;
                             }
@@ -573,7 +573,7 @@ fn install_latest_release(data_dir: &Path) -> Result<(String, PathBuf), String> 
         return Err("GitHub вернул неожиданный адрес архива".to_owned());
     }
 
-    let mut response = client
+    let response = client
         .get(download_url)
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
@@ -897,8 +897,10 @@ fn make_tray_icon() -> tray_icon::Icon {
         }
     }
     for y in [8..12, 14..18, 20..24] {
-        for x in 8..24 {
-            set_icon_pixel(&mut rgba, x, y);
+        for row in y {
+            for x in 8..24 {
+                set_icon_pixel(&mut rgba, x, row);
+            }
         }
     }
     tray_icon::Icon::from_rgba(rgba, 32, 32).expect("valid 32x32 tray icon")
