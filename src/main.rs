@@ -521,7 +521,18 @@ impl eframe::App for EasyRussiaApp {
                         )
                         .clicked()
                     {
+                        self.open_service_manager();
+                    }
+                });
                 ui.label(egui::RichText::new(format!("Конфиги: {REPOSITORY}")).size(10.0).color(egui::Color32::GRAY));
+            });
+    }
+}
+
+fn install_latest_release(data_dir: &Path) -> Result<(String, PathBuf), String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("EasyRussia/0.1.0")
+        .timeout(Duration::from_secs(90))
         .build()
         .map_err(display_error)?;
     let release: GitHubRelease = client
